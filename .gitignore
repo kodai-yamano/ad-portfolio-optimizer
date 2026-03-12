@@ -1,0 +1,14 @@
+# 仮想環境
+ven/
+venv/
+.venv/
+env/
+
+# Claude Code
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
