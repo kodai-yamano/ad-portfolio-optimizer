@@ -373,6 +373,46 @@ def summarize_mid(result):
     )
 
 
+# ──────────────────────────────────────────────
+# パレートフロンティア算出
+# ──────────────────────────────────────────────
+def compute_pareto_curve(media, target_acq, cpa_min, cpa_max):
+    """
+    面予CPA上限を cpa_min → cpa_max に 5000円刻みで緩和しながら
+    粗利最大化（目標件数±50件維持）を繰り返し解いてパレートフロンティアを算出する。
+    戻り値: list[dict] {"cpa_limit", "avg_menyo_cpa", "gross_profit", "total_acq"}
+    """
+    STEP = 5_000
+    cpa_start = int(cpa_min // STEP) * STEP
+    cpa_end   = (int(cpa_max // STEP) + 1) * STEP
+    if cpa_start == cpa_end:
+        cpa_end = cpa_start + STEP
+
+    cpa_values = list(range(cpa_start, cpa_end + 1, STEP))
+
+    raw_points = []
+    for cpa_limit in cpa_values:
+        res  = solve_portfolio(media, cpa_limit, target_acq, "target_strict")
+        info = summarize(res)
+        if info is None:
+            continue
+        raw_points.append({
+            "cpa_limit":     cpa_limit,
+            "avg_menyo_cpa": round(info["avg_menyo_cpa"]),
+            "gross_profit":  info["total_gp"],
+            "total_acq":     info["total_acq"],
+        })
+
+    # 同一 avg_menyo_cpa が複数出た場合は粗利最大のものを残す
+    best: dict = {}
+    for pt in raw_points:
+        key = pt["avg_menyo_cpa"]
+        if key not in best or pt["gross_profit"] > best[key]["gross_profit"]:
+            best[key] = pt
+
+    return sorted(best.values(), key=lambda p: p["avg_menyo_cpa"])
+
+
 INFEASIBLE_MSGS = {
     "profit_uncap": (
         "🚀 **粗利MAX** — 解が見つかりません。  \n"
@@ -869,6 +909,79 @@ with tab_plan:
         render_detail(info_menyo,  "menyo_min")
     with sc_tab_b:
         render_detail(info_target, "target_strict")
+
+    st.divider()
+
+    # ──────────────────────────────────────────────
+    # 粗利 vs 面予CPA トレードオフカーブ
+    # ──────────────────────────────────────────────
+    st.markdown("##### 📈 粗利 vs 面予CPA トレードオフカーブ（パレートフロンティア）")
+    st.caption(
+        "面予CPAの許容ラインを段階的に緩和すると粗利がどう伸びるかを示します。"
+        "⚡ 効率特化（左端）から 🚀 上限突破（右端）へのトレードオフを確認できます。"
+    )
+
+    _cpa_min = info_menyo["avg_menyo_cpa"]  if info_menyo  else None
+    _cpa_max = info_profit["avg_menyo_cpa"] if info_profit else None
+
+    if _cpa_min is None or _cpa_max is None:
+        st.info("⚡ 面予CPA最小化 と 🚀 粗利MAX の両シナリオに解がある場合に表示されます。")
+    elif _cpa_max - _cpa_min < 1:
+        st.info("2シナリオの面予CPAが同値のためトレードオフカーブは存在しません。")
+    else:
+        with st.spinner("トレードオフカーブを計算中..."):
+            _pareto_pts = compute_pareto_curve(media, target_acq, _cpa_min, _cpa_max)
+
+        if len(_pareto_pts) < 2:
+            st.info("有効なポイントが2点未満のためグラフを表示できません。")
+        else:
+            _df_p = pd.DataFrame(_pareto_pts)
+
+            # 端点ラベル
+            _labels = [""] * len(_df_p)
+            _labels[0]  = "⚡ 効率特化"
+            _labels[-1] = "🚀 上限突破"
+            _df_p["label"] = _labels
+
+            # 粗利を万円表示用に変換
+            _df_p["gross_profit_man"] = _df_p["gross_profit"].apply(
+                lambda v: f"¥{v/10_000:,.1f}万" if abs(v) >= 10_000 else f"¥{v:,.0f}"
+            )
+
+            fig_pareto = go.Figure()
+            fig_pareto.add_trace(go.Scatter(
+                x=_df_p["avg_menyo_cpa"],
+                y=_df_p["gross_profit"],
+                mode="lines+markers+text",
+                text=_df_p["label"],
+                textposition="top center",
+                textfont=dict(size=12),
+                marker=dict(size=8, color="#636EFA",
+                            line=dict(width=1.5, color="white")),
+                line=dict(color="#636EFA", width=2.5),
+                customdata=_df_p[["avg_menyo_cpa", "gross_profit_man", "total_acq"]].values,
+                hovertemplate=(
+                    "<b>面予CPA</b>: ¥%{customdata[0]:,.0f}<br>"
+                    "<b>粗利</b>: %{customdata[1]}<br>"
+                    "<b>獲得件数</b>: %{customdata[2]:,.1f} 件"
+                    "<extra></extra>"
+                ),
+            ))
+            fig_pareto.add_vline(
+                x=target_cpa, line_dash="dash", line_color="#FFA15A",
+                annotation_text=f"🎯 目標面予CPA ¥{target_cpa:,}",
+                annotation_position="top right",
+                annotation_font_size=12,
+            )
+            fig_pareto.update_layout(
+                xaxis_title="全体の面予CPA（円）",
+                yaxis_title="全体の粗利（円）",
+                height=420,
+                margin=dict(t=30, b=10, l=10, r=10),
+                xaxis=dict(tickformat=",.0f", showgrid=True),
+                yaxis=dict(tickformat=",.0f", showgrid=True),
+            )
+            st.plotly_chart(fig_pareto, use_container_width=True, key="pareto_curve")
 
     st.divider()
 
