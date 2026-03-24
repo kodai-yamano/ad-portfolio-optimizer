@@ -185,6 +185,11 @@ def solve_portfolio(media, target_cpa, target_acq, scenario):
     prob += total_acq_lp >= max(0, target_acq - 50), "acq_lower"
     prob += total_acq_lp <= target_acq + 50,         "acq_upper"
 
+    # ── 媒体ごとの最低獲得件数制約 ────────────────────────────
+    for i in range(n):
+        if media[i]["min_acq"] > 0:
+            prob += x_base[i] + x_extra[i] >= media[i]["min_acq"], f"min_acq_{i}"
+
     prob.solve()
 
     if LpStatus[prob.status] != "Optimal":
@@ -308,6 +313,11 @@ def solve_mid_portfolio(mid_media, total_actual_acq, total_actual_cost,
     if remaining_lower > 0:
         prob += total_remaining >= remaining_lower, "remaining_lower"
     prob += total_remaining <= remaining_upper, "remaining_upper"
+
+    # 制約4: 媒体ごとの残り最低獲得件数 ──────────────────────────
+    for i in range(n):
+        if mid_media[i]["min_remaining_acq"] > 0:
+            prob += x[i] >= mid_media[i]["min_remaining_acq"], f"min_rem_acq_{i}"
 
     prob.solve()
 
@@ -448,6 +458,7 @@ with tab_plan:
     DEFAULT_DATA = pd.DataFrame({
         "媒体名":              ["Google", "Yahoo", "Meta", "LINE"],
         "上限件数":            [80,       50,      120,    40],
+        "最低獲得件数":        [0,        0,       0,      0],
         "CPA（円）":           [60_000,   55_000,  45_000, 40_000],
         "報酬単価（円）":       [15_000,   15_000,  15_000, 15_000],
         "面予率（%）":         [60.0,     60.0,    55.0,   50.0],
@@ -464,6 +475,9 @@ with tab_plan:
         column_config={
             "媒体名":              st.column_config.TextColumn("媒体名", width="small"),
             "上限件数":            st.column_config.NumberColumn("上限件数", min_value=0, step=1, format="%d 件"),
+            "最低獲得件数":        st.column_config.NumberColumn(
+                "最低獲得件数", min_value=0, step=1, format="%d 件",
+                help="この件数以上は必ず獲得する（0=制約なし）。上限件数を超えた値は自動で丸められます。"),
             "CPA（円）":           st.column_config.NumberColumn("CPA（円）", min_value=0, step=1_000, format="¥%d"),
             "報酬単価（円）":       st.column_config.NumberColumn("報酬単価（円）", min_value=0, step=1_000, format="¥%d"),
             "面予率（%）":         st.column_config.NumberColumn("面予率（%）", min_value=0.0, max_value=100.0, step=0.5, format="%.1f %%"),
@@ -484,7 +498,7 @@ with tab_plan:
         st.stop()
 
     # ── データクレンジング ──
-    for _col in ["上限件数", "CPA（円）", "面予率（%）", "安全拡大件数"]:
+    for _col in ["上限件数", "最低獲得件数", "CPA（円）", "面予率（%）", "安全拡大件数"]:
         edited_df[_col] = _clean_col(edited_df[_col], default=0.0)
     edited_df["報酬単価（円）"]      = _clean_col(edited_df["報酬単価（円）"],      default=15_000.0)
     edited_df["超過時CPA悪化率(%)"]  = _clean_col(edited_df["超過時CPA悪化率(%)"],  default=120.0)
@@ -509,6 +523,10 @@ with tab_plan:
         gross_profit = revenue - cost
         roas         = revenue / cost if cost > 0 else 0.0
 
+        # ── 最低獲得件数（安全処理：上限件数を超えられない）────
+        min_acq_val = int(float(row["最低獲得件数"]))
+        min_acq_val = min(min_acq_val, cap)
+
         # ── 収穫逓減パラメータ ─────────────────────────────────
         safe_cap_raw = float(row["安全拡大件数"])
         safe_cap_val = int(safe_cap_raw) if safe_cap_raw > 0 else cap
@@ -528,6 +546,7 @@ with tab_plan:
             menyo_rate=menyo_rate, menyo_cpa=menyo_cpa,
             cost=cost, revenue=revenue,
             gross_profit=gross_profit, roas=roas,
+            min_acq=min_acq_val,
             # 収穫逓減
             safe_cap=safe_cap_val,
             cpa_extra=cpa_extra_val,
@@ -1065,6 +1084,7 @@ with tab_mid:
         "予測CTR（%）":          [0.5,         0.5,         0.5,         0.5],
         "予測CVR（%）":          [2.0,         2.0,         2.0,         2.0],
         "残り獲得上限数（件）":   [40,          25,          60,          25],
+        "最低残り獲得件数（件）": [0,           0,           0,           0],
         "報酬単価（円）":         [15_000,      15_000,      15_000,      15_000],
     })
 
@@ -1080,7 +1100,10 @@ with tab_mid:
             "予測CPM（円）":         st.column_config.NumberColumn("予測CPM（円）",        min_value=0, step=100,   format="¥%d"),
             "予測CTR（%）":          st.column_config.NumberColumn("予測CTR（%）",         min_value=0.0, step=0.1, format="%.2f %%"),
             "予測CVR（%）":          st.column_config.NumberColumn("予測CVR（%）",         min_value=0.0, step=0.1, format="%.2f %%"),
-            "残り獲得上限数（件）":   st.column_config.NumberColumn("残り獲得上限数（件）", min_value=0, step=1,     format="%d 件"),
+            "残り獲得上限数（件）":   st.column_config.NumberColumn("残り獲得上限数（件）", min_value=0, step=1, format="%d 件"),
+            "最低残り獲得件数（件）": st.column_config.NumberColumn(
+                "最低残り獲得件数（件）", min_value=0, step=1, format="%d 件",
+                help="残り期間でこの件数以上は必ず獲得する（0=制約なし）。残り上限数を超えた値は自動で丸められます。"),
             "報酬単価（円）":         st.column_config.NumberColumn("報酬単価（円）",       min_value=0, step=1_000, format="¥%d"),
         },
     )
@@ -1091,7 +1114,7 @@ with tab_mid:
 
     # ── データクレンジング ──
     for _col in ["実績獲得件数", "実績消化広告費（円）", "予測CPM（円）",
-                 "予測CTR（%）", "予測CVR（%）", "残り獲得上限数（件）"]:
+                 "予測CTR（%）", "予測CVR（%）", "残り獲得上限数（件）", "最低残り獲得件数（件）"]:
         mid_edited_df[_col] = _clean_col(mid_edited_df[_col], default=0.0)
     mid_edited_df["報酬単価（円）"] = _clean_col(mid_edited_df["報酬単価（円）"], default=15_000.0)
 
@@ -1106,8 +1129,10 @@ with tab_mid:
         cpm          = float(row["予測CPM（円）"])
         ctr_pct      = float(row["予測CTR（%）"])
         cvr_pct      = float(row["予測CVR（%）"])
-        remaining_cap= float(row["残り獲得上限数（件）"])
-        reward       = float(row["報酬単価（円）"])
+        remaining_cap    = float(row["残り獲得上限数（件）"])
+        min_rem_acq_raw  = int(float(row["最低残り獲得件数（件）"]))
+        min_rem_acq_val  = min(min_rem_acq_raw, int(remaining_cap))  # 上限を超えられない
+        reward           = float(row["報酬単価（円）"])
 
         # 残り期間の見込みCPA（ゼロ割り防止）
         if ctr_pct > 0 and cvr_pct > 0:
@@ -1123,6 +1148,7 @@ with tab_mid:
             ctr_pct=ctr_pct,
             cvr_pct=cvr_pct,
             remaining_cap=remaining_cap,
+            min_remaining_acq=min_rem_acq_val,
             reward=reward,
             remaining_cpa=remaining_cpa,
         ))
